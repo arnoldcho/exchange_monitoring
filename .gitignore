@@ -6,6 +6,10 @@
 # 의존성
 node_modules/
 
+# lock 파일: 서버(Node 12/npm 6)와 로컬(npm 11)의 lockfile 포맷이 달라
+# 서버에서 npm install 시 자체 생성하도록 커밋 제외
+package-lock.json
+
 # 로그
 *.log
 npm-debug.log*

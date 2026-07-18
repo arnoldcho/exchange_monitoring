@@ -1,0 +1,20 @@
+{
+  "name": "exchange-monitoring",
+  "version": "1.0.0",
+  "description": "LBANK/MEXC 관리 코인 시세 급등락 텔레그램 알림 봇 (Node 12 호환)",
+  "main": "lbank_monitor_v1.1.js",
+  "scripts": {
+    "start:lbank": "node lbank_monitor_v1.1.js",
+    "start:mexc": "node mexc_monitor_v1.1.js"
+  },
+  "engines": {
+    "node": ">=12.18.3"
+  },
+  "dependencies": {
+    "axios": "^0.27.2",
+    "dotenv": "^16.0.3",
+    "node-telegram-bot-api": "^0.50.0",
+    "request": "^2.88.2"
+  },
+  "license": "MIT"
+}
