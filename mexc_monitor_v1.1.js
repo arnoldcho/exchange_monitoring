@@ -24,8 +24,9 @@ const TELEGRAM_TOKEN = process.env.SMARTPIG_SIGNAL_BOT_TOKEN; // Smartpig_Signal
 const CHAT_ID = process.env.SMARTPIG_SIGNAL_CHAT_ID; // Smartpig Signal Channel
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: false });
 
-// 감시 대상 코인 목록
-const TARGET_COINS = [
+// 감시 대상 코인 목록 (.env: MEXC_TARGET_COINS, 콤마 구분 / 예: BTCUSDT,ETHUSDT)
+// env 미설정 시 아래 기본 목록 사용
+const DEFAULT_TARGET_COINS = [
   "BTCUSDT",
   "ETHUSDT",
   "XRPUSDT",
@@ -38,6 +39,11 @@ const TARGET_COINS = [
   "YUUSDT",
   "BITBOARDUSDT",
 ];
+const envCoins = (process.env.MEXC_TARGET_COINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const TARGET_COINS = envCoins.length ? envCoins : DEFAULT_TARGET_COINS;
 
 // 실행 주기 (5분 = 300,000ms)
 const INTERVAL_MS = 300000;
