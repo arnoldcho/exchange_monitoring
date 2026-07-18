@@ -6,7 +6,6 @@
 
 require("dotenv").config();
 const axios = require("axios");
-const crypto = require("crypto");
 const TelegramBot = require("node-telegram-bot-api");
 
 // ----------------------------------------------------------------
@@ -21,17 +20,13 @@ const LBANK_API_DOMAINS = [
 ];
 const API_PATH = "/v2/ticker/24hr.do";
 
-// 인증(서명) 폴백용 도메인.
-// 공개 티커에서 사라진 종목(위험경보/경고 종목 등)은 API Key 서명 호출로만 조회됨.
-// lbank.js 의 baseRestUrl 과 동일한 마켓메이커 검증 도메인을 우선 사용.
-const LBANK_AUTH_DOMAINS = [
-  "https://mmapi.lbankverify.com",
-  "https://www.lbkex.net",
-];
-
-// API 인증 키 (.env: LBANK_API_KEY / LBANK_SECRET_KEY) - lbank.js 와 동일
-const LBANK_API_KEY = process.env.LBANK_API_KEY;
-const LBANK_SECRET_KEY = process.env.LBANK_SECRET_KEY;
+// 화이트리스트 종목 폴백용 마켓메이커 도메인.
+// 공개 티커에서 10008(currency pair nonsupport)로 숨겨지는 화이트리스트 종목
+// (예: ooju_usdt, cstars_usdt)은 이 도메인에서만 조회됨.
+// - lbank.js 의 baseRestUrl 과 동일 (마켓메이커 검증 도메인, IP 화이트리스트)
+// - kline 은 서명 불필요한 평문 GET (lbank.js 의 kline 과 동일 방식)
+// ※ 반드시 화이트리스트된 서버 IP(= lbank.js 실행 서버)에서 돌려야 접근 가능.
+const LBANK_MM_DOMAIN = "https://mmapi.lbankverify.com";
 
 // 텔레그램 API 설정 (.env: SMARTPIG_SIGNAL_BOT_TOKEN / SMARTPIG_SIGNAL_CHAT_ID)
 const TELEGRAM_TOKEN = process.env.SMARTPIG_SIGNAL_BOT_TOKEN; // Smartpig_Signal_bot
@@ -74,104 +69,53 @@ function numberWithCommas(x) {
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ----------------------------------------------------------------
-// LBANK 서명(인증) 유틸리티 - lbank.js 의 getSign 로직과 동일
+// 화이트리스트 종목 폴백 (마켓메이커 도메인 kline)
 // ----------------------------------------------------------------
 
-// 30~40자 랜덤 문자열(echostr) 생성
-function makeEchoStr() {
-  const chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  let str = "";
-  for (let i = 0; i < 35; i++) {
-    str += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return str;
-}
+// mmapi.lbankverify.com 에서 kline(평문 GET)으로 시세 취득.
+// 공개 티커에 없는(10008) 화이트리스트 종목 전용. lbank.js 의 kline 과 동일 경로/파라미터.
+// kline 응답: data = [ [timestamp, open, high, low, close, volume], ... ]
+async function fetchTickerFromMM(symbol) {
+  try {
+    const response = await axios.get(`${LBANK_MM_DOMAIN}/v2/kline.do`, {
+      params: {
+        symbol: symbol,
+        size: 1,
+        type: "day1", // 하루 캔들 1개 -> close=현재가, volume=24h 거래량(base)
+        time: Math.floor(Date.now() / 1000),
+      },
+      timeout: 5000,
+    });
 
-// 서명된 쿼리스트링/헤더 생성
-// (파라미터 알파벳 정렬 → URLSearchParams → MD5 대문자 → HMAC-SHA256)
-function buildSignedRequest(params) {
-  const timestamp = Date.now().toString();
-  const echostr = makeEchoStr();
+    const body = response.data;
+    if (body && body.error_code && Number(body.error_code) !== 0) {
+      throw new Error(`error_code ${body.error_code}`);
+    }
 
-  const signData = {
-    api_key: LBANK_API_KEY,
-    echostr,
-    signature_method: "HmacSHA256",
-    ...params,
-    timestamp,
-  };
+    const candle = body && body.data && body.data[0];
+    if (!candle) return null;
 
-  // 키를 알파벳 순으로 정렬
-  const sortedData = Object.keys(signData)
-    .sort()
-    .reduce((acc, key) => {
-      acc[key] = signData[key];
-      return acc;
-    }, {});
+    // [ts, open, high, low, close, volume]
+    const latest = candle[4];
+    const baseVolume = parseFloat(candle[5]); // base 자산 거래량
+    // turnover(24h 거래대금, USDT)는 kline 에 없어 close*volume 로 근사
+    const turnover = baseVolume * parseFloat(latest);
 
-  const parameters = new URLSearchParams(sortedData).toString();
-
-  const preparedStr = crypto
-    .createHash("md5")
-    .update(parameters)
-    .digest("hex")
-    .toUpperCase();
-
-  const sign = crypto
-    .createHmac("sha256", LBANK_SECRET_KEY)
-    .update(preparedStr)
-    .digest("hex");
-
-  return {
-    query: { api_key: LBANK_API_KEY, sign, ...params },
-    headers: {
-      contentType: "application/x-www-form-urlencoded",
-      echostr,
-      timestamp,
-      signature_method: "HmacSHA256",
-    },
-  };
-}
-
-// 인증(서명) 티커 조회 - 공개 조회 실패 종목(경고 종목 등) 폴백용
-async function fetchTickerAuthenticated(symbol) {
-  if (!LBANK_API_KEY || !LBANK_SECRET_KEY) {
+    return {
+      data: {
+        ticker: { latest: String(latest), turnover: String(turnover) },
+      },
+      source: `${LBANK_MM_DOMAIN} (kline)`,
+    };
+  } catch (error) {
     console.warn(
-      `[Auth] LBANK_API_KEY / LBANK_SECRET_KEY 미설정 - ${symbol} 서명 조회 불가 (.env 확인)`
+      `[Warning] mmapi kline failed ${symbol} @ ${LBANK_MM_DOMAIN}: ${error.message}`
     );
     return null;
   }
-
-  for (const domain of LBANK_AUTH_DOMAINS) {
-    try {
-      const { query, headers } = buildSignedRequest({ symbol });
-      const response = await axios.post(`${domain}${API_PATH}`, null, {
-        params: query,
-        headers,
-        timeout: 5000,
-      });
-
-      const body = response.data;
-      if (body && body.error_code && Number(body.error_code) !== 0) {
-        throw new Error(`error_code ${body.error_code}`);
-      }
-
-      const data = body && body.data && body.data[0];
-      if (data) {
-        return { data, source: `${domain} (signed)` };
-      }
-    } catch (error) {
-      console.warn(
-        `[Warning] Signed fetch failed ${symbol} @ ${domain}: ${error.message}`
-      );
-    }
-  }
-
-  return null;
 }
 
-// 티커 조회: 공개 도메인 우선 → 실패 시 서명 호출 폴백
+// 티커 조회: 공개 도메인 우선 → 실패 시 마켓메이커(mmapi) kline 폴백
 async function fetchTicker(symbol) {
   // 1) 공개(인증 불필요) 도메인 순차 시도
   for (const domain of LBANK_API_DOMAINS) {
@@ -192,11 +136,9 @@ async function fetchTicker(symbol) {
     }
   }
 
-  // 2) 공개 조회 전부 실패 → 서명(인증) 호출 폴백
-  console.warn(
-    `[Info] ${symbol} 공개 조회 실패 - 서명(인증) 호출로 폴백 시도`
-  );
-  return await fetchTickerAuthenticated(symbol);
+  // 2) 공개 조회 전부 실패(화이트리스트 종목 등) → mmapi kline 폴백
+  console.warn(`[Info] ${symbol} 공개 조회 실패 - mmapi kline 폴백 시도`);
+  return await fetchTickerFromMM(symbol);
 }
 
 // ----------------------------------------------------------------
